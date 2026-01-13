@@ -121,9 +121,99 @@ static void initialize() {
         {"MGCopyAnswer", (void *)my_MGCopyAnswer, (void **)&original_MGCopyAnswer}
     };
     rebind_symbols(rebindings, 1);
+}
+
+
+// --- UI Implementation (Floating Button) ---
+
+@interface UIButton (Draggable)
+@end
+
+@implementation UIButton (Draggable)
+- (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event {
+    UITouch *touch = [touches anyObject];
+    CGPoint nowPoint = [touch locationInView:self.superview];
+    CGPoint prevPoint = [touch previousLocationInView:self.superview];
+    float deltaX = nowPoint.x - prevPoint.x;
+    float deltaY = nowPoint.y - prevPoint.y;
+    self.center = CGPointMake(self.center.x + deltaX, self.center.y + deltaY);
+}
+@end
+
+static void ShowAlert(NSString *title, NSString *message) {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     
-    // Add a way to trigger rotation (e.g., tap gesture or just on load)
-    // For now, we rotate if specific file/flag exists or just provide a button hook if UI access is available.
-    // Simplifying: Just printing that it's active. Rotation logic exists in `RotateIDs()` 
-    // functionality is available if we want to expose it to UI.
+    UIWindow *keyWindow = [UIApplication sharedApplication].keyWindow;
+    UIViewController *rootVC = keyWindow.rootViewController;
+    // Walk up to find the top VC
+    while (rootVC.presentedViewController) {
+        rootVC = rootVC.presentedViewController;
+    }
+    [rootVC presentViewController:alert animated:YES completion:nil];
+}
+
+static void SetupFloatingButton() {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIWindow *window = [UIApplication sharedApplication].keyWindow;
+        if (!window) return;
+        
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+        [btn setTitle:@"Reset ID" forState:UIControlStateNormal];
+        [btn setBackgroundColor:[UIColor redColor]];
+        [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        btn.frame = CGRectMake(50, 100, 100, 40);
+        btn.layer.cornerRadius = 20;
+        btn.layer.zPosition = 9999; // Always on top
+        
+        [btn addTarget:window action:@selector(handleResetTap) forControlEvents:UIControlEventTouchUpInside];
+        
+        // Add gesture for simple dragging (implemented in category for simplicity or just naive implementation)
+        // For a raw dylib, keeping it simple:
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:window action:@selector(handleDrag:)];
+        [btn addGestureRecognizer:pan];
+        
+        [window addSubview:btn];
+    });
+}
+
+// Helper methods on UIWindow (using category to add methods)
+@interface UIWindow (ButtonLogic)
+@end
+
+@implementation UIWindow (ButtonLogic)
+- (void)handleResetTap {
+    RotateIDs();
+    ShowAlert(@"Success", @"Device IDs have been rotated.\nPlease restart the app for changes to fully apply.");
+}
+
+- (void)handleDrag:(UIPanGestureRecognizer *)gesture {
+    UIView *btn = gesture.view;
+    CGPoint translation = [gesture translationInView:self];
+    btn.center = CGPointMake(btn.center.x + translation.x, btn.center.y + translation.y);
+    [gesture setTranslation:CGPointZero inView:self];
+}
+@end
+
+
+// Hook makeKeyAndVisible to inject button
+@interface UIWindow (Hook)
+- (void)swizzled_makeKeyAndVisible;
+@end
+
+@implementation UIWindow (Hook)
+- (void)swizzled_makeKeyAndVisible {
+    [self swizzled_makeKeyAndVisible];
+    SetupFloatingButton();
+}
+@end
+
+__attribute__((constructor))
+static void initialize_ui() {
+    // Swizzle UIWindow makeKeyAndVisible
+    Method original = class_getInstanceMethod([UIWindow class], @selector(makeKeyAndVisible));
+    Method swizzled = class_getInstanceMethod([UIWindow class], @selector(swizzled_makeKeyAndVisible));
+    method_exchangeImplementations(original, swizzled);
 }

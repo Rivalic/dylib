@@ -2,7 +2,7 @@ TARGET = DeviceRotator.dylib
 SYSROOT = /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk
 ARCHS = -arch arm64 -arch arm64e
 LIBS = -framework Foundation -framework UIKit -framework AdSupport
-CC = clang
+CC = clang++
 
 all: $(TARGET)
 

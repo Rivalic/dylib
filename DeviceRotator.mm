@@ -193,7 +193,7 @@ static void SetupFloatingButton() {
     UIView *btn = gesture.view;
     CGPoint translation = [gesture translationInView:self];
     btn.center = CGPointMake(btn.center.x + translation.x, btn.center.y + translation.y);
-    [gesture setTranslation:CGPointZero inView:self];
+    [gesture setTranslation:CGPointMake(0,0) inView:self];
 }
 @end
 

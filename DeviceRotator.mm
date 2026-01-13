@@ -3,6 +3,10 @@
 #import <AdSupport/AdSupport.h>
 #import <objc/runtime.h>
 #include "fishhook.h"
+#include <sys/stat.h>
+#include <dlfcn.h>
+#include <mach-o/dyld.h>
+
 
 // --- Configuration ---
 static NSString *const kCustomIDFVKey = @"kMyCustomIDFV";
@@ -94,6 +98,183 @@ CFStringRef my_MGCopyAnswer(CFStringRef prop) {
 }
 
 
+// --- Jailbreak Detection Bypass ---
+
+// List of common jailbreak-related paths
+static NSArray *JailbreakPaths() {
+    static NSArray *paths = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        paths = @[
+            @"/Applications/Cydia.app",
+            @"/Library/MobileSubstrate/MobileSubstrate.dylib",
+            @"/bin/bash",
+            @"/usr/sbin/sshd",
+            @"/etc/apt",
+            @"/private/var/lib/apt/",
+            @"/private/var/lib/cydia",
+            @"/private/var/stash",
+            @"/private/var/tmp/cydia.log",
+            @"/System/Library/LaunchDaemons/com.ikey.bbot.plist",
+            @"/System/Library/LaunchDaemons/com.saurik.Cydia.Startup.plist",
+            @"/usr/libexec/cydia/",
+            @"/usr/bin/sshd",
+            @"/usr/libexec/sftp-server",
+            @"/var/cache/apt",
+            @"/var/lib/cydia",
+            @"/var/log/syslog",
+            @"/bin/sh",
+            @"/etc/ssh/sshd_config",
+            @"/Library/MobileSubstrate/DynamicLibraries",
+            @"/var/mobile/Library/SBSettings/Themes",
+            @"/usr/lib/libsubstrate.dylib",
+            @"/usr/libexec/substrated",
+            @"/.installed_unc0ver",
+            @"/.bootstrapped_electra",
+            @"/usr/lib/libjailbreak.dylib",
+            @"/jb/lzma",
+            @"/jb/offsets.plist",
+            @"/usr/share/jailbreak/injectme.plist",
+            @"/etc/apt/sources.list.d/electra.list",
+            @"/etc/apt/sources.list.d/sileo.sources",
+            @"/.bootstrapped",
+            @"/usr/lib/TweakInject",
+            @"/electra",
+            @"/var/binpack",
+            @"/Library/dpkg/info"
+        ];
+    });
+    return paths;
+}
+
+static BOOL IsJailbreakPath(const char *path) {
+    if (!path) return NO;
+    NSString *pathStr = [NSString stringWithUTF8String:path];
+    for (NSString *jbPath in JailbreakPaths()) {
+        if ([pathStr hasPrefix:jbPath] || [pathStr isEqualToString:jbPath]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+// Hook stat
+static int (*original_stat)(const char *, struct stat *);
+int my_stat(const char *path, struct stat *buf) {
+    if (IsJailbreakPath(path)) {
+        errno = ENOENT;
+        return -1;
+    }
+    return original_stat(path, buf);
+}
+
+// Hook lstat
+static int (*original_lstat)(const char *, struct stat *);
+int my_lstat(const char *path, struct stat *buf) {
+    if (IsJailbreakPath(path)) {
+        errno = ENOENT;
+        return -1;
+    }
+    return original_lstat(path, buf);
+}
+
+// Hook fopen
+static FILE *(*original_fopen)(const char *, const char *);
+FILE *my_fopen(const char *path, const char *mode) {
+    if (IsJailbreakPath(path)) {
+        errno = ENOENT;
+        return NULL;
+    }
+    return original_fopen(path, mode);
+}
+
+// Hook access
+static int (*original_access)(const char *, int);
+int my_access(const char *path, int mode) {
+    if (IsJailbreakPath(path)) {
+        errno = ENOENT;
+        return -1;
+    }
+    return original_access(path, mode);
+}
+
+// Hook fork (prevent fork-based jailbreak detection)
+static pid_t (*original_fork)(void);
+pid_t my_fork(void) {
+    // Return -1 to simulate fork failure
+    errno = ENOSYS;
+    return -1;
+}
+
+// Hook system
+static int (*original_system)(const char *);
+int my_system(const char *cmd) {
+    // Block system calls
+    return -1;
+}
+
+// Hook _dyld_get_image_name
+static const char *(*original_dyld_get_image_name)(uint32_t);
+const char *my_dyld_get_image_name(uint32_t image_index) {
+    const char *name = original_dyld_get_image_name(image_index);
+    if (name) {
+        // Check if it's a jailbreak-related dylib
+        if (strstr(name, "MobileSubstrate") || 
+            strstr(name, "substrate") || 
+            strstr(name, "TweakInject") ||
+            strstr(name, "Cephei") ||
+            strstr(name, "Rocket") ||
+            strstr(name, "PreferenceLoader")) {
+            return "/System/Library/Frameworks/UIKit.framework/UIKit"; // Return safe path
+        }
+    }
+    return name;
+}
+
+// Hook NSFileManager fileExistsAtPath
+@interface NSFileManager (JBBypass)
+- (BOOL)jb_fileExistsAtPath:(NSString *)path;
+- (BOOL)jb_fileExistsAtPath:(NSString *)path isDirectory:(BOOL *)isDirectory;
+@end
+
+@implementation NSFileManager (JBBypass)
+- (BOOL)jb_fileExistsAtPath:(NSString *)path {
+    for (NSString *jbPath in JailbreakPaths()) {
+        if ([path hasPrefix:jbPath] || [path isEqualToString:jbPath]) {
+            return NO;
+        }
+    }
+    return [self jb_fileExistsAtPath:path];
+}
+
+- (BOOL)jb_fileExistsAtPath:(NSString *)path isDirectory:(BOOL *)isDirectory {
+    for (NSString *jbPath in JailbreakPaths()) {
+        if ([path hasPrefix:jbPath] || [path isEqualToString:jbPath]) {
+            return NO;
+        }
+    }
+    return [self jb_fileExistsAtPath:path isDirectory:isDirectory];
+}
+@end
+
+// Hook canOpenURL (detects URL schemes like cydia://)
+@interface UIApplication (JBBypass)
+- (BOOL)jb_canOpenURL:(NSURL *)url;
+@end
+
+@implementation UIApplication (JBBypass)
+- (BOOL)jb_canOpenURL:(NSURL *)url {
+    NSString *scheme = [url.scheme lowercaseString];
+    NSArray *jbSchemes = @[@"cydia", @"sileo", @"zbra", @"filza", @"activator"];
+    if ([jbSchemes containsObject:scheme]) {
+        return NO;
+    }
+    return [self jb_canOpenURL:url];
+}
+@end
+
+
+
 // --- Setup ---
 
 __attribute__((constructor))
@@ -118,9 +299,32 @@ static void initialize() {
     
     // 3. Hook MGCopyAnswer with fishhook
     struct rebinding rebindings[] = {
-        {"MGCopyAnswer", (void *)my_MGCopyAnswer, (void **)&original_MGCopyAnswer}
+        {"MGCopyAnswer", (void *)my_MGCopyAnswer, (void **)&original_MGCopyAnswer},
+        {"stat", (void *)my_stat, (void **)&original_stat},
+        {"lstat", (void *)my_lstat, (void **)&original_lstat},
+        {"fopen", (void *)my_fopen, (void **)&original_fopen},
+        {"access", (void *)my_access, (void **)&original_access},
+        {"fork", (void *)my_fork, (void **)&original_fork},
+        {"system", (void *)my_system, (void **)&original_system},
+        {"_dyld_get_image_name", (void *)my_dyld_get_image_name, (void **)&original_dyld_get_image_name}
     };
-    rebind_symbols(rebindings, 1);
+    rebind_symbols(rebindings, 9);
+    
+    // 4. Swizzle NSFileManager
+    Method originalFileExists1 = class_getInstanceMethod([NSFileManager class], @selector(fileExistsAtPath:));
+    Method swizzledFileExists1 = class_getInstanceMethod([NSFileManager class], @selector(jb_fileExistsAtPath:));
+    method_exchangeImplementations(originalFileExists1, swizzledFileExists1);
+    
+    Method originalFileExists2 = class_getInstanceMethod([NSFileManager class], @selector(fileExistsAtPath:isDirectory:));
+    Method swizzledFileExists2 = class_getInstanceMethod([NSFileManager class], @selector(jb_fileExistsAtPath:isDirectory:));
+    method_exchangeImplementations(originalFileExists2, swizzledFileExists2);
+    
+    // 5. Swizzle UIApplication canOpenURL
+    Method originalCanOpen = class_getInstanceMethod([UIApplication class], @selector(canOpenURL:));
+    Method swizzledCanOpen = class_getInstanceMethod([UIApplication class], @selector(jb_canOpenURL:));
+    method_exchangeImplementations(originalCanOpen, swizzledCanOpen);
+    
+    NSLog(@"[DeviceRotator] Jailbreak bypass enabled!");
 }
 
 

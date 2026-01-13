@@ -239,21 +239,37 @@ const char *my_dyld_get_image_name(uint32_t image_index) {
 
 @implementation NSFileManager (JBBypass)
 - (BOOL)jb_fileExistsAtPath:(NSString *)path {
-    for (NSString *jbPath in JailbreakPaths()) {
-        if ([path hasPrefix:jbPath] || [path isEqualToString:jbPath]) {
-            return NO;
+    @try {
+        if (!path || path.length == 0) {
+            return [self jb_fileExistsAtPath:path];
         }
+        for (NSString *jbPath in JailbreakPaths()) {
+            if ([path hasPrefix:jbPath] || [path isEqualToString:jbPath]) {
+                return NO;
+            }
+        }
+        return [self jb_fileExistsAtPath:path];
+    } @catch (NSException *exception) {
+        return NO;
     }
-    return [self jb_fileExistsAtPath:path];
 }
 
 - (BOOL)jb_fileExistsAtPath:(NSString *)path isDirectory:(BOOL *)isDirectory {
-    for (NSString *jbPath in JailbreakPaths()) {
-        if ([path hasPrefix:jbPath] || [path isEqualToString:jbPath]) {
-            return NO;
+    @try {
+        if (!path || path.length == 0) {
+            return [self jb_fileExistsAtPath:path isDirectory:isDirectory];
         }
+        for (NSString *jbPath in JailbreakPaths()) {
+            if ([path hasPrefix:jbPath] || [path isEqualToString:jbPath]) {
+                if (isDirectory) *isDirectory = NO;
+                return NO;
+            }
+        }
+        return [self jb_fileExistsAtPath:path isDirectory:isDirectory];
+    } @catch (NSException *exception) {
+        if (isDirectory) *isDirectory = NO;
+        return NO;
     }
-    return [self jb_fileExistsAtPath:path isDirectory:isDirectory];
 }
 @end
 
@@ -264,12 +280,19 @@ const char *my_dyld_get_image_name(uint32_t image_index) {
 
 @implementation UIApplication (JBBypass)
 - (BOOL)jb_canOpenURL:(NSURL *)url {
-    NSString *scheme = [url.scheme lowercaseString];
-    NSArray *jbSchemes = @[@"cydia", @"sileo", @"zbra", @"filza", @"activator"];
-    if ([jbSchemes containsObject:scheme]) {
+    @try {
+        if (!url || !url.scheme) {
+            return [self jb_canOpenURL:url];
+        }
+        NSString *scheme = [url.scheme lowercaseString];
+        NSArray *jbSchemes = @[@"cydia", @"sileo", @"zbra", @"filza", @"activator"];
+        if ([jbSchemes containsObject:scheme]) {
+            return NO;
+        }
+        return [self jb_canOpenURL:url];
+    } @catch (NSException *exception) {
         return NO;
     }
-    return [self jb_canOpenURL:url];
 }
 @end
 
@@ -279,52 +302,86 @@ const char *my_dyld_get_image_name(uint32_t image_index) {
 
 __attribute__((constructor))
 static void initialize() {
-    NSLog(@"[DeviceRotator] Loaded!");
-
-    // 1. Swizzle IDFV
-    Method originalIDFV = class_getInstanceMethod([UIDevice class], @selector(identifierForVendor));
-    Method swizzledIDFV = class_getInstanceMethod([UIDevice class], @selector(swizzled_identifierForVendor));
-    method_exchangeImplementations(originalIDFV, swizzledIDFV);
-    
-    // 2. Swizzle IDFA
-    // Note: ASIdentifierManager might not be loaded, should load framework if needed or check class
-    Class asClass = objc_getClass("ASIdentifierManager");
-    if (asClass) {
-        Method originalIDFA = class_getInstanceMethod(asClass, @selector(advertisingIdentifier));
-        Method swizzledIDFA = class_getInstanceMethod(asClass, @selector(swizzled_advertisingIdentifier));
-        method_exchangeImplementations(originalIDFA, swizzledIDFA);
-    } else {
-        NSLog(@"[DeviceRotator] ASIdentifierManager class not found, skipping IDFA hook.");
+    @autoreleasepool {
+        NSLog(@"[DeviceRotator] Loading...");
+        
+        @try {
+            // 1. Swizzle IDFV
+            Method originalIDFV = class_getInstanceMethod([UIDevice class], @selector(identifierForVendor));
+            Method swizzledIDFV = class_getInstanceMethod([UIDevice class], @selector(swizzled_identifierForVendor));
+            if (originalIDFV && swizzledIDFV) {
+                method_exchangeImplementations(originalIDFV, swizzledIDFV);
+                NSLog(@"[DeviceRotator] IDFV hook installed");
+            }
+        } @catch (NSException *e) {
+            NSLog(@"[DeviceRotator] IDFV hook failed: %@", e);
+        }
+        
+        @try {
+            // 2. Swizzle IDFA
+            Class asClass = objc_getClass("ASIdentifierManager");
+            if (asClass) {
+                Method originalIDFA = class_getInstanceMethod(asClass, @selector(advertisingIdentifier));
+                Method swizzledIDFA = class_getInstanceMethod(asClass, @selector(swizzled_advertisingIdentifier));
+                if (originalIDFA && swizzledIDFA) {
+                    method_exchangeImplementations(originalIDFA, swizzledIDFA);
+                    NSLog(@"[DeviceRotator] IDFA hook installed");
+                }
+            }
+        } @catch (NSException *e) {
+            NSLog(@"[DeviceRotator] IDFA hook failed: %@", e);
+        }
+        
+        @try {
+            // 3. Hook MGCopyAnswer with fishhook
+            struct rebinding rebindings[] = {
+                {"MGCopyAnswer", (void *)my_MGCopyAnswer, (void **)&original_MGCopyAnswer},
+                {"stat", (void *)my_stat, (void **)&original_stat},
+                {"lstat", (void *)my_lstat, (void **)&original_lstat},
+                {"fopen", (void *)my_fopen, (void **)&original_fopen},
+                {"access", (void *)my_access, (void **)&original_access},
+                {"fork", (void *)my_fork, (void **)&original_fork},
+                {"system", (void *)my_system, (void **)&original_system},
+                {"_dyld_get_image_name", (void *)my_dyld_get_image_name, (void **)&original_dyld_get_image_name}
+            };
+            rebind_symbols(rebindings, 8);
+            NSLog(@"[DeviceRotator] C function hooks installed");
+        } @catch (NSException *e) {
+            NSLog(@"[DeviceRotator] C hooks failed: %@", e);
+        }
+        
+        @try {
+            // 4. Swizzle NSFileManager
+            Method originalFileExists1 = class_getInstanceMethod([NSFileManager class], @selector(fileExistsAtPath:));
+            Method swizzledFileExists1 = class_getInstanceMethod([NSFileManager class], @selector(jb_fileExistsAtPath:));
+            if (originalFileExists1 && swizzledFileExists1) {
+                method_exchangeImplementations(originalFileExists1, swizzledFileExists1);
+            }
+            
+            Method originalFileExists2 = class_getInstanceMethod([NSFileManager class], @selector(fileExistsAtPath:isDirectory:));
+            Method swizzledFileExists2 = class_getInstanceMethod([NSFileManager class], @selector(jb_fileExistsAtPath:isDirectory:));
+            if (originalFileExists2 && swizzledFileExists2) {
+                method_exchangeImplementations(originalFileExists2, swizzledFileExists2);
+            }
+            NSLog(@"[DeviceRotator] NSFileManager hooks installed");
+        } @catch (NSException *e) {
+            NSLog(@"[DeviceRotator] NSFileManager hook failed: %@", e);
+        }
+        
+        @try {
+            // 5. Swizzle UIApplication canOpenURL
+            Method originalCanOpen = class_getInstanceMethod([UIApplication class], @selector(canOpenURL:));
+            Method swizzledCanOpen = class_getInstanceMethod([UIApplication class], @selector(jb_canOpenURL:));
+            if (originalCanOpen && swizzledCanOpen) {
+                method_exchangeImplementations(originalCanOpen, swizzledCanOpen);
+                NSLog(@"[DeviceRotator] UIApplication hook installed");
+            }
+        } @catch (NSException *e) {
+            NSLog(@"[DeviceRotator] UIApplication hook failed: %@", e);
+        }
+        
+        NSLog(@"[DeviceRotator] Loaded successfully!");
     }
-    
-    // 3. Hook MGCopyAnswer with fishhook
-    struct rebinding rebindings[] = {
-        {"MGCopyAnswer", (void *)my_MGCopyAnswer, (void **)&original_MGCopyAnswer},
-        {"stat", (void *)my_stat, (void **)&original_stat},
-        {"lstat", (void *)my_lstat, (void **)&original_lstat},
-        {"fopen", (void *)my_fopen, (void **)&original_fopen},
-        {"access", (void *)my_access, (void **)&original_access},
-        {"fork", (void *)my_fork, (void **)&original_fork},
-        {"system", (void *)my_system, (void **)&original_system},
-        {"_dyld_get_image_name", (void *)my_dyld_get_image_name, (void **)&original_dyld_get_image_name}
-    };
-    rebind_symbols(rebindings, 9);
-    
-    // 4. Swizzle NSFileManager
-    Method originalFileExists1 = class_getInstanceMethod([NSFileManager class], @selector(fileExistsAtPath:));
-    Method swizzledFileExists1 = class_getInstanceMethod([NSFileManager class], @selector(jb_fileExistsAtPath:));
-    method_exchangeImplementations(originalFileExists1, swizzledFileExists1);
-    
-    Method originalFileExists2 = class_getInstanceMethod([NSFileManager class], @selector(fileExistsAtPath:isDirectory:));
-    Method swizzledFileExists2 = class_getInstanceMethod([NSFileManager class], @selector(jb_fileExistsAtPath:isDirectory:));
-    method_exchangeImplementations(originalFileExists2, swizzledFileExists2);
-    
-    // 5. Swizzle UIApplication canOpenURL
-    Method originalCanOpen = class_getInstanceMethod([UIApplication class], @selector(canOpenURL:));
-    Method swizzledCanOpen = class_getInstanceMethod([UIApplication class], @selector(jb_canOpenURL:));
-    method_exchangeImplementations(originalCanOpen, swizzledCanOpen);
-    
-    NSLog(@"[DeviceRotator] Jailbreak bypass enabled!");
 }
 
 
@@ -361,25 +418,31 @@ static void ShowAlert(NSString *title, NSString *message) {
 
 static void SetupFloatingButton() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIWindow *window = [UIApplication sharedApplication].keyWindow;
-        if (!window) return;
-        
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-        [btn setTitle:@"Reset ID" forState:UIControlStateNormal];
-        [btn setBackgroundColor:[UIColor redColor]];
-        [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        btn.frame = CGRectMake(50, 100, 100, 40);
-        btn.layer.cornerRadius = 20;
-        btn.layer.zPosition = 9999; // Always on top
-        
-        [btn addTarget:window action:@selector(handleResetTap) forControlEvents:UIControlEventTouchUpInside];
-        
-        // Add gesture for simple dragging (implemented in category for simplicity or just naive implementation)
-        // For a raw dylib, keeping it simple:
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:window action:@selector(handleDrag:)];
-        [btn addGestureRecognizer:pan];
-        
-        [window addSubview:btn];
+        @try {
+            UIWindow *window = [UIApplication sharedApplication].keyWindow;
+            if (!window) {
+                NSLog(@"[DeviceRotator] No key window found, skipping button");
+                return;
+            }
+            
+            UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+            [btn setTitle:@"Reset ID" forState:UIControlStateNormal];
+            [btn setBackgroundColor:[UIColor redColor]];
+            [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+            btn.frame = CGRectMake(50, 100, 100, 40);
+            btn.layer.cornerRadius = 20;
+            btn.layer.zPosition = 9999; // Always on top
+            
+            [btn addTarget:window action:@selector(handleResetTap) forControlEvents:UIControlEventTouchUpInside];
+            
+            UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:window action:@selector(handleDrag:)];
+            [btn addGestureRecognizer:pan];
+            
+            [window addSubview:btn];
+            NSLog(@"[DeviceRotator] Reset button added");
+        } @catch (NSException *e) {
+            NSLog(@"[DeviceRotator] Button setup failed: %@", e);
+        }
     });
 }
 
